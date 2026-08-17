@@ -74,9 +74,6 @@ jobs:
 
       - run: flutter pub get
 
-      - name: Generate code
-        run: dart run build_runner build --delete-conflicting-outputs
-
       - name: Flutter analyze
         continue-on-error: true
         run: flutter analyze
@@ -115,10 +112,6 @@ jobs:
 
       - working-directory: engram
         run: flutter pub get
-
-      - name: Generate code
-        working-directory: engram
-        run: dart run build_runner build --delete-conflicting-outputs
 
       - name: Build split APKs
         working-directory: engram
@@ -185,10 +178,6 @@ jobs:
       - working-directory: engram
         run: flutter pub get
 
-      - name: Generate code
-        working-directory: engram
-        run: dart run build_runner build --delete-conflicting-outputs
-
       - name: Build Linux
         working-directory: engram
         run: flutter build linux --release
@@ -238,10 +227,6 @@ jobs:
 
       - working-directory: engram
         run: flutter pub get
-
-      - name: Generate code
-        working-directory: engram
-        run: dart run build_runner build --delete-conflicting-outputs
 
       - name: Refresh CocoaPods specs
         working-directory: engram
@@ -297,10 +282,6 @@ jobs:
 
       - working-directory: engram
         run: flutter pub get
-
-      - name: Generate code
-        working-directory: engram
-        run: dart run build_runner build --delete-conflicting-outputs
 
       - name: Build Web
         working-directory: engram
