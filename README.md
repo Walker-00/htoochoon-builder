@@ -6,14 +6,11 @@ here via a read-only deploy key instead of hosting the workflow itself.
 ## engram (new-ui-ux)
 
 `.github/workflows/engram.yaml` builds `git@github.com:Walker-00/htoochoon-engram.git`
-(branch `rust`) — Android, Linux, iOS, Web — and uploads to the backend's
-`new-ui-ux` release channel, served at `https://backend.htoochoon.com/download/new-ui-ux/<file>`.
-Separate from the production app's `latest` channel (built by `htoochoon-flutter`'s
-own workflow) — both install side by side, different Android `applicationId`.
-
-windows/ and macos/ don't exist in htoochoon-engram yet, so those jobs aren't
-here. Add them (copy from `htoochoon-flutter/.github/workflows/flutter.yaml`)
-once `flutter create --platforms=windows,macos .` has been run there.
+(branch `rust`) — Android, Linux, Windows, macOS, iOS, Web — and uploads to the
+backend's `new-ui-ux` release channel, served at
+`https://backend.htoochoon.com/download/new-ui-ux/<file>`. Separate from the
+production app's `latest` channel (built by `htoochoon-flutter`'s own
+workflow) — both install side by side, different Android `applicationId`.
 
 ### Secrets required (Settings → Secrets and variables → Actions)
 

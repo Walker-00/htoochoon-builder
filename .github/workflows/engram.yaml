@@ -10,11 +10,7 @@ name: Engram (new-ui-ux) Build
 # engram is checked out at build time via a read-only deploy key rather than
 # carrying its own CI/secrets.
 #
-# Only platforms that actually exist in htoochoon-engram today are built:
-# Android, Linux, iOS, Web. windows/ and macos/ directories don't exist in
-# that repo yet (never `flutter create --platforms=windows,macos .`'d) — add
-# those jobs once that's done, copying the equivalent job from
-# htoochoon-flutter's flutter.yaml.
+# Builds all 6 platforms: Android, Linux, Windows, macOS, iOS, Web.
 #
 # SECRETS (add in this repo's Settings → Secrets → Actions):
 #   ENGRAM_DEPLOY_KEY   — read-only SSH deploy key for git@github.com:Walker-00/htoochoon-engram.git
@@ -196,6 +192,222 @@ jobs:
 
 
 # ============================================================
+# Windows  ->  htoochoon.exe  (Inno Setup installer)
+# `windows-latest` has full VS Community — ATL included, no extra install.
+# ============================================================
+
+  windows:
+    name: Windows Desktop
+    needs: analyze
+    runs-on: windows-latest
+    steps:
+      - name: Checkout builder (for the deploy action)
+        uses: actions/checkout@v4
+
+      - name: Checkout engram
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ENGRAM_REPO }}
+          ref: ${{ env.ENGRAM_REF }}
+          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
+          path: engram
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - run: flutter config --enable-windows-desktop
+      - working-directory: engram
+        run: flutter pub get
+
+      # flutter_webrtc downloads libwebrtc.zip during the build; CMake 3.28+
+      # refuses to extract an archive through a SYMLINK. This first build
+      # materializes Flutter's plugin symlinks then FAILS at the webrtc extract
+      # — that's expected. We then convert the symlinks to junctions (which are
+      # NOT symlinks, so the extract passes) and run a real, complete build.
+      # NOTE: don't use `--config-only` here — after it, the final build skips
+      # the CMake INSTALL step and ships a broken bundle (exe only, no DLLs/data).
+      - name: Materialize plugin symlinks (first build fails at webrtc extract — expected)
+        shell: pwsh
+        continue-on-error: true
+        working-directory: engram
+        run: flutter build windows --release
+
+      - name: Convert plugin symlinks to junctions
+        shell: pwsh
+        working-directory: engram
+        run: |
+          $dir = "windows/flutter/ephemeral/.plugin_symlinks"
+          if (!(Test-Path $dir)) { Write-Host "ERROR: .plugin_symlinks not created by first build"; exit 1 }
+          Get-ChildItem $dir | Where-Object { $_.LinkType } | ForEach-Object {
+            $target = $_.Target
+            if ($target -is [array]) { $target = $target[0] }
+            if (![IO.Path]::IsPathRooted($target)) {
+              $target = [IO.Path]::GetFullPath((Join-Path $_.Parent.FullName $target))
+            }
+            $path = $_.FullName
+            Remove-Item $path -Force
+            cmd /c mklink /J `"$path`" `"$target`" | Out-Null
+            Write-Host "Junction: $($_.Name) -> $target"
+          }
+
+      - name: Build Windows (complete bundle)
+        working-directory: engram
+        run: flutter build windows --release
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+      # flutter build links the exe but the complete runtime (flutter_windows.dll,
+      # data\icudtl.dat, flutter_assets, plugin DLLs) isn't always next to it in
+      # CI. cmake --install assembles a COMPLETE bundle — but on Windows it lands
+      # in C:\Program Files\<app> by default and Flutter's generated CMake can
+      # force-pin that prefix (so --prefix may be ignored). So: install, then
+      # DETECT wherever the complete bundle actually is, and package from there.
+      - name: Assemble & locate complete bundle
+        shell: pwsh
+        working-directory: engram
+        run: |
+          # Try to install into a clean staging dir first.
+          $stage = "$PWD\dist-win"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          cmake --install build\windows\x64 --config Release --prefix $stage 2>&1 | Out-Host
+
+          # Candidate bundle locations, in priority order.
+          $candidates = @(
+            $stage,
+            "build\windows\x64\runner\Release",
+            "$env:ProgramFiles\htoochoon_engram",
+            "${env:ProgramFiles(x86)}\htoochoon_engram"
+          )
+          $bundle = $null
+          foreach ($c in $candidates) {
+            if ((Test-Path "$c\flutter_windows.dll") -and (Test-Path "$c\data\icudtl.dat")) {
+              $bundle = (Resolve-Path $c).Path; break
+            }
+          }
+          if (-not $bundle) {
+            Write-Host "::error::No complete bundle found. Searched:"
+            $candidates | ForEach-Object { Write-Host "  $_" }
+            Write-Host "=== flutter_windows.dll locations under build\ ==="
+            Get-ChildItem build -Recurse -Filter flutter_windows.dll -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
+          Write-Host "Complete bundle: $bundle"
+          Get-ChildItem $bundle | Select-Object Name, Length | Format-Table -AutoSize
+          # Drop linker artifacts that may ride along.
+          Remove-Item "$bundle\*.exp","$bundle\*.lib" -ErrorAction SilentlyContinue
+          $size = (Get-ChildItem $bundle -Recurse | Measure-Object Length -Sum).Sum / 1MB
+          Write-Host ("Bundle OK — {0:N1} MB uncompressed" -f $size)
+          "WIN_BUNDLE=$bundle" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Compress-Archive -Path "$env:WIN_BUNDLE\*" -DestinationPath "release\htoochoon-windows-x64.zip" -Force
+          $mb = (Get-Item release\htoochoon-windows-x64.zip).Length / 1MB
+          Write-Host ("Zip size: {0:N1} MB" -f $mb)
+          if ($mb -lt 8) { Write-Host "::error::Zip only $([math]::Round($mb,1)) MB — incomplete bundle"; exit 1 }
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $src = "$env:WIN_BUNDLE\*"
+          $iss = @"
+          [Setup]
+          AppName=HtooChoon (new UI/UX)
+          AppVersion=1.0.0
+          AppPublisher=HtooChoon
+          DefaultDirName={autopf}\HtooChoon-NewUI
+          DefaultGroupName=HtooChoon (new UI/UX)
+          DisableProgramGroupPage=yes
+          OutputDir=installer
+          OutputBaseFilename=htoochoon
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          ArchitecturesAllowed=x64
+          ArchitecturesInstallIn64BitMode=x64
+          [Files]
+          Source: "$src"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+          [Icons]
+          Name: "{group}\HtooChoon"; Filename: "{app}\htoochoon_engram.exe"
+          Name: "{autodesktop}\HtooChoon"; Filename: "{app}\htoochoon_engram.exe"
+          [Run]
+          Filename: "{app}\htoochoon_engram.exe"; Description: "Launch HtooChoon"; Flags: nowait postinstall skipifsilent
+          "@
+          Set-Content -Path htoochoon.iss -Value $iss -Encoding ASCII
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" htoochoon.iss
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item installer\htoochoon.exe release\htoochoon.exe
+          # A complete Flutter installer is ~12-20 MB. Anything under 9 MB means
+          # the runtime/assets didn't get packed — fail rather than ship a crasher.
+          $mb = (Get-Item release\htoochoon.exe).Length / 1MB
+          Write-Host ("Installer size: {0:N1} MB" -f $mb)
+          if ($mb -lt 9) { Write-Host "::error::Installer only $([math]::Round($mb,1)) MB — incomplete bundle"; exit 1 }
+          Get-ChildItem release
+
+      - name: Deploy
+        uses: ./.github/actions/deploy
+        with:
+          base_url: ${{ env.RELEASE_BASE_URL }}
+          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
+          target: ${{ env.RELEASE_TARGET }}
+
+
+# ============================================================
+# macOS  ->  htoochoon.dmg
+# ============================================================
+
+  macos:
+    name: macOS Desktop
+    needs: analyze
+    runs-on: macos-latest
+    steps:
+      - name: Checkout builder (for the deploy action)
+        uses: actions/checkout@v4
+
+      - name: Checkout engram
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ENGRAM_REPO }}
+          ref: ${{ env.ENGRAM_REF }}
+          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
+          path: engram
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - working-directory: engram
+        run: flutter pub get
+
+      - name: Build macOS
+        working-directory: engram
+        run: flutter build macos --release
+
+      - name: Make DMG
+        run: |
+          mkdir -p release
+          APP="$(find engram/build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)"
+          if [ -z "$APP" ]; then echo "No .app found:"; ls -la engram/build/macos/Build/Products/Release || true; exit 1; fi
+          echo "Packaging: $APP"
+          hdiutil create -volname "HtooChoon" -srcfolder "$APP" -ov -format UDZO release/htoochoon.dmg
+
+      - name: Deploy
+        uses: ./.github/actions/deploy
+        with:
+          base_url: ${{ env.RELEASE_BASE_URL }}
+          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
+          target: ${{ env.RELEASE_TARGET }}
+
+
+# ============================================================
 # iOS  ->  htoochoon.ipa  (unsigned, sideload/AltStore)
 # Unverified on engram yet (never built past `flutter create`'s default
 # scaffold) — non-blocking so a failure here doesn't take down the other
@@ -312,7 +524,7 @@ jobs:
 
   manifest:
     name: Publish manifest
-    needs: [android, linux, ios, web]
+    needs: [android, linux, windows, macos, ios, web]
     if: always()
     runs-on: ubuntu-latest
     env:
@@ -342,6 +554,8 @@ jobs:
             "htoochoon-armeabi-v7a.apk": ("android", "armeabi-v7a", "Android armeabi-v7a"),
             "htoochoon-x86_64.apk": ("android", "x86_64", "Android x86_64"),
             "htoochoon-linux-x64.tar.gz": ("linux", "x64", "Linux x64 (tar.gz)"),
+            "htoochoon.exe": ("windows", "x64", "Windows installer (.exe)"),
+            "htoochoon.dmg": ("macos", "universal", "macOS (.dmg)"),
             "htoochoon.ipa": ("ios", "universal", "iOS (unsigned .ipa)"),
             "htoochoon-web.tar.gz": ("web", "x64", "Web build (tar.gz)"),
           }
@@ -357,7 +571,7 @@ jobs:
             plat, arch, label = labels.get(name, ("other", "", name))
             files.append({"name": name, "size": int(e.get("size") or 0),
                           "platform": plat, "arch": arch, "label": label})
-          order = ["android", "linux", "ios", "web", "other"]
+          order = ["android", "linux", "windows", "macos", "ios", "web", "other"]
           files.sort(key=lambda f: (order.index(f["platform"]) if f["platform"] in order else 99, f["name"]))
           print(json.dumps({
             "version": sha[:7],
@@ -379,7 +593,7 @@ jobs:
         if: ${{ always() && env.CF_API_TOKEN != '' && env.CF_ZONE_ID != '' }}
         run: |
           base="https://backend.htoochoon.com/download/${{ env.RELEASE_TARGET }}"
-          files='latest.json htoochoon.apk htoochoon-arm64-v8a.apk htoochoon-armeabi-v7a.apk htoochoon-x86_64.apk htoochoon-linux-x64.tar.gz htoochoon.ipa htoochoon-web.tar.gz'
+          files='latest.json htoochoon.apk htoochoon-arm64-v8a.apk htoochoon-armeabi-v7a.apk htoochoon-x86_64.apk htoochoon-linux-x64.tar.gz htoochoon.exe htoochoon.dmg htoochoon.ipa htoochoon-web.tar.gz'
           json='{"files":['
           first=1
           for f in $files; do
