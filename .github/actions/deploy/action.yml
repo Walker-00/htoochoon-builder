@@ -81,6 +81,19 @@ runs:
             case "$resp" in
               *'"ok":true'*) echo "  $name → $resp"; break ;;
             esac
+            # The commit assembles the file and THEN deletes the staged parts.
+            # A Cloudflare 520 can eat the response even though the backend
+            # already finished — so a retry hits "missing part 0" on a file that
+            # is in fact already published. Before retrying, confirm via the
+            # list endpoint whether it landed at the right size.
+            local_sz="$(wc -c < "$f" | tr -d ' ')"
+            listing="$(curl -sS --connect-timeout 30 --max-time 60 \
+              --retry 4 --retry-delay 5 --retry-all-errors \
+              -H "x-release-key: $KEY" "$BASE/god/release/list?target=$TARGET" || echo '')"
+            if printf '%s' "$listing" | grep -q "\"name\":\"$name\",\"size\":$local_sz"; then
+              echo "  $name already published ($local_sz bytes; commit response was lost)"
+              break
+            fi
             if [ "$cattempt" -ge 5 ]; then
               echo "::error::Commit failed for $name after $cattempt tries: $resp"
               rm -rf "$tmp"; exit 1
