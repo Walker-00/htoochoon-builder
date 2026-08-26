@@ -46,27 +46,49 @@ runs:
           split -b 16777216 "$f" "$tmp/part."
           i=0
           for part in "$tmp"/part.*; do
-            code="$(curl -sS -o /dev/null -w '%{http_code}' \
-              --retry 6 --retry-delay 5 --retry-all-errors \
-              -X PUT -H "x-release-key: $KEY" \
-              -H 'Content-Type: application/octet-stream' \
-              --data-binary @"$part" \
-              "$BASE/god/release/part?name=$name&index=$i&target=$TARGET")"
-            if [ "$code" != "200" ] && [ "$code" != "201" ]; then
-              echo "::error::Upload of $name part $i failed (HTTP $code)"
-              rm -rf "$tmp"; exit 1
-            fi
+            # curl's own --retry does NOT cover a 520 (or any 5xx): without
+            # --fail curl treats the error response as a successful transfer, so
+            # it never retries and we'd bail on a transient Cloudflare origin
+            # blip. Retry at the app level on any non-2xx.
+            attempt=0
+            while :; do
+              attempt=$((attempt + 1))
+              code="$(curl -sS -o /dev/null -w '%{http_code}' \
+                --connect-timeout 30 --max-time 600 \
+                --retry 6 --retry-delay 5 --retry-all-errors \
+                -X PUT -H "x-release-key: $KEY" \
+                -H 'Content-Type: application/octet-stream' \
+                --data-binary @"$part" \
+                "$BASE/god/release/part?name=$name&index=$i&target=$TARGET" || echo 000)"
+              if [ "$code" = "200" ] || [ "$code" = "201" ]; then break; fi
+              if [ "$attempt" -ge 5 ]; then
+                echo "::error::Upload of $name part $i failed after $attempt tries (HTTP $code)"
+                rm -rf "$tmp"; exit 1
+              fi
+              echo "  $name part $i HTTP $code — retry $attempt/5"
+              sleep 10
+            done
             i=$((i + 1))
           done
-          resp="$(curl -sS --retry 6 --retry-delay 5 --retry-all-errors \
-            -X POST -H "x-release-key: $KEY" -H 'Content-Type: application/json' \
-            --data "{\"name\":\"$name\",\"parts\":$i,\"target\":\"$TARGET\"}" \
-            "$BASE/god/release/commit")"
+          cattempt=0
+          while :; do
+            cattempt=$((cattempt + 1))
+            resp="$(curl -sS --connect-timeout 30 --max-time 120 \
+              --retry 6 --retry-delay 5 --retry-all-errors \
+              -X POST -H "x-release-key: $KEY" -H 'Content-Type: application/json' \
+              --data "{\"name\":\"$name\",\"parts\":$i,\"target\":\"$TARGET\"}" \
+              "$BASE/god/release/commit" || echo '')"
+            case "$resp" in
+              *'"ok":true'*) echo "  $name → $resp"; break ;;
+            esac
+            if [ "$cattempt" -ge 5 ]; then
+              echo "::error::Commit failed for $name after $cattempt tries: $resp"
+              rm -rf "$tmp"; exit 1
+            fi
+            echo "  $name commit retry $cattempt/5: $resp"
+            sleep 10
+          done
           rm -rf "$tmp"
-          case "$resp" in
-            *'"ok":true'*) echo "  $name → $resp" ;;
-            *) echo "::error::Commit failed for $name: $resp"; exit 1 ;;
-          esac
           uploaded="$uploaded $name"
         done
         if [ -z "$uploaded" ]; then echo "::error::Nothing in ./release to upload"; exit 1; fi
