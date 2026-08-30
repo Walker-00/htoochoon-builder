@@ -256,9 +256,10 @@ jobs:
 
       - name: Build Windows (complete bundle)
         working-directory: engram
-        run: flutter build windows --release
+        shell: pwsh
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+        run: flutter build windows --release
 
       # flutter build links the exe but the complete runtime (flutter_windows.dll,
       # data\icudtl.dat, flutter_assets, plugin DLLs) isn't always next to it in

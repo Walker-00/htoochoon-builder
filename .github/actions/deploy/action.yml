@@ -73,10 +73,11 @@ runs:
           cattempt=0
           while :; do
             cattempt=$((cattempt + 1))
+            local_sz="$(wc -c < "$f" | tr -d ' ')"
             resp="$(curl -sS --connect-timeout 30 --max-time 120 \
               --retry 6 --retry-delay 5 --retry-all-errors \
               -X POST -H "x-release-key: $KEY" -H 'Content-Type: application/json' \
-              --data "{\"name\":\"$name\",\"parts\":$i,\"target\":\"$TARGET\"}" \
+              --data "{\"name\":\"$name\",\"parts\":$i,\"size\":$local_sz,\"target\":\"$TARGET\"}" \
               "$BASE/god/release/commit" || echo '')"
             case "$resp" in
               *'"ok":true'*) echo "  $name → $resp"; break ;;
@@ -86,7 +87,6 @@ runs:
             # already finished — so a retry hits "missing part 0" on a file that
             # is in fact already published. Before retrying, confirm via the
             # list endpoint whether it landed at the right size.
-            local_sz="$(wc -c < "$f" | tr -d ' ')"
             listing="$(curl -sS --connect-timeout 30 --max-time 60 \
               --retry 4 --retry-delay 5 --retry-all-errors \
               -H "x-release-key: $KEY" "$BASE/god/release/list?target=$TARGET" || echo '')"

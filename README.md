@@ -11,6 +11,9 @@ backend's `new-ui-ux` release channel, served at
 `https://backend.htoochoon.com/download/new-ui-ux/<file>`. Separate from the
 production app's `latest` channel (built by `htoochoon-flutter`'s own
 workflow) — both install side by side, different Android `applicationId`.
+The shared deploy action sends each artifact's expected byte size to the
+backend commit endpoint, so a truncated or empty upload is rejected before it
+can become a published release.
 
 ### Secrets required (Settings → Secrets and variables → Actions)
 
