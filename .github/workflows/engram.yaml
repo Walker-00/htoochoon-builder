@@ -71,7 +71,6 @@ jobs:
       - run: flutter pub get
 
       - name: Flutter analyze
-        continue-on-error: true
         run: flutter analyze
 
 
@@ -411,16 +410,14 @@ jobs:
 
 # ============================================================
 # iOS  ->  htoochoon.ipa  (unsigned, sideload/AltStore)
-# Unverified on engram yet (never built past `flutter create`'s default
-# scaffold) — non-blocking so a failure here doesn't take down the other
-# platforms.
+# This is a release gate: the manifest is not promoted unless every advertised
+# platform artifact is built and uploaded successfully.
 # ============================================================
 
   ios:
     name: iOS
     needs: analyze
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - name: Checkout builder (for the deploy action)
         uses: actions/checkout@v4
@@ -499,7 +496,6 @@ jobs:
 
       - name: Build Web
         working-directory: engram
-        continue-on-error: true
         run: flutter build web --release
 
       - name: Package
@@ -527,7 +523,6 @@ jobs:
   manifest:
     name: Publish manifest
     needs: [android, linux, windows, macos, ios, web]
-    if: always()
     runs-on: ubuntu-latest
     env:
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -535,21 +530,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Capture the application source commit as the release version. The
+      # builder repository commit is provenance too, but is not the app build.
+      - name: Checkout engram for release provenance
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ENGRAM_REPO }}
+          ref: ${{ env.ENGRAM_REF }}
+          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
+          path: engram
+
       - name: Build latest.json
         env:
           RELEASE_KEY: ${{ secrets.RELEASE_UPLOAD_KEY }}
           BASE: ${{ env.RELEASE_BASE_URL }}
-          SHA: ${{ github.sha }}
         run: |
           curl -sS --retry 6 --retry-delay 5 --retry-all-errors \
             -H "x-release-key: $RELEASE_KEY" \
             "${BASE%/}/god/release/list?target=${{ env.RELEASE_TARGET }}" > listing.json || echo '[]' > listing.json
           cat listing.json
           mkdir -p release
-          python3 - "$SHA" listing.json <<'PY' > release/latest.json
+          SOURCE_SHA="$(git -C engram rev-parse HEAD)"
+          python3 - "$SOURCE_SHA" "${{ github.sha }}" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" listing.json <<'PY' > release/latest.json
           import sys, json, datetime
           sha = sys.argv[1] if len(sys.argv) > 1 else ""
-          listing = sys.argv[2] if len(sys.argv) > 2 else "listing.json"
+          builder_sha = sys.argv[2] if len(sys.argv) > 2 else ""
+          workflow_run = sys.argv[3] if len(sys.argv) > 3 else ""
+          listing = sys.argv[4] if len(sys.argv) > 4 else "listing.json"
           labels = {
             "htoochoon.apk": ("android", "universal", "Android (universal APK)"),
             "htoochoon-arm64-v8a.apk": ("android", "arm64-v8a", "Android arm64-v8a"),
@@ -578,6 +585,9 @@ jobs:
           print(json.dumps({
             "version": sha[:7],
             "commit": sha,
+            "builderCommit": builder_sha,
+            "workflowRun": workflow_run,
+            "channel": "new-ui-ux",
             "released": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "files": files,
           }, indent=2))

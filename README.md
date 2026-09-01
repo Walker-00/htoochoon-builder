@@ -9,11 +9,15 @@ here via a read-only deploy key instead of hosting the workflow itself.
 (branch `rust`) — Android, Linux, Windows, macOS, iOS, Web — and uploads to the
 backend's `new-ui-ux` release channel, served at
 `https://backend.htoochoon.com/download/new-ui-ux/<file>`. Separate from the
-production app's `latest` channel (built by `htoochoon-flutter`'s own
-workflow) — both install side by side, different Android `applicationId`.
+legacy production app's `latest` channel — both install side by side with
+different Android `applicationId` values.
 The shared deploy action sends each artifact's expected byte size to the
 backend commit endpoint, so a truncated or empty upload is rejected before it
 can become a published release.
+
+The manifest is published only after every advertised platform job succeeds.
+It records the Engram source SHA, Builder SHA and workflow-run URL so the Founder
+Control Center can show exact release provenance.
 
 ### Secrets required (Settings → Secrets and variables → Actions)
 
