@@ -2,7 +2,7 @@
 
 The single CI delivery source for the active HtooChoon Engram Flutter app.
 The private application source stays in `Walker-00/htoochoon-engram`; this
-public repository owns its Android build workflow and no longer builds the
+public repository owns its multi-platform build workflow and no longer builds the
 retired Flutter client.
 
 ## Release flow
@@ -10,7 +10,7 @@ retired Flutter client.
 ```text
 Engram rust branch
        ↓
-Builder validation + Android APK build
+Builder validation + Android, Linux, Windows, macOS, iOS and Web builds
        ↓
 nightly
        ↓ Founder approval
@@ -20,9 +20,11 @@ production (`latest` download compatibility path)
 ```
 
 `.github/workflows/engram.yaml` runs manually, whenever Builder's `rust`
-branch changes, and nightly at 00:00 Asia/Yangon. A successful run uploads only
-the universal and per-ABI Android APKs to
-`https://backend.htoochoon.com/download/nightly/`.
+branch changes, and nightly at 00:00 Asia/Yangon. A successful run uploads the
+Android universal/per-ABI APKs, Linux bundle, Windows installer and portable
+bundle, macOS DMG, unsigned iOS IPA, and Web deployment bundle to
+`https://backend.htoochoon.com/download/nightly/`. The manifest is published
+only after every advertised platform succeeds.
 
 CI has no route that writes to beta or production. Promotions are authenticated
 Founder operations performed by the HtooChoon Control Center. The backend

@@ -1,4 +1,4 @@
-name: Engram Android Nightly
+name: Engram Multi-platform Nightly
 
 # Builder is the single delivery source for the active Engram Flutter app.
 # Successful CI writes to `nightly` only. Founder promotion moves a validated
@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: engram-android-nightly
+  group: engram-multiplatform-nightly
   cancel-in-progress: true
 
 env:
@@ -30,6 +30,8 @@ jobs:
   validate:
     name: Validate Engram
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.engram-source.outputs.sha }}
     steps:
       - name: Checkout Engram source
         uses: actions/checkout@v4
@@ -37,6 +39,10 @@ jobs:
           repository: ${{ env.ENGRAM_REPO }}
           ref: ${{ env.ENGRAM_REF }}
           ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
+
+      - name: Pin Engram source commit
+        id: engram-source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: subosito/flutter-action@v2
         with:
@@ -70,7 +76,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.ENGRAM_REPO }}
-          ref: ${{ env.ENGRAM_REF }}
+          ref: ${{ needs.validate.outputs.source_sha }}
           ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
           path: engram
 
@@ -118,9 +124,300 @@ jobs:
           key: ${{ secrets.RELEASE_UPLOAD_KEY }}
           target: ${{ env.RELEASE_TARGET }}
 
+  linux:
+    name: Build Linux Desktop
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Builder actions
+        uses: actions/checkout@v4
+
+      - name: Checkout Engram source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ENGRAM_REPO }}
+          ref: ${{ needs.validate.outputs.source_sha }}
+          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
+          path: engram
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good \
+            libsecret-1-dev libpulse-dev libasound2-dev libmpv-dev mpv
+
+      - run: flutter config --enable-linux-desktop
+      - working-directory: engram
+        run: flutter pub get
+
+      - name: Build Linux
+        working-directory: engram
+        run: flutter build linux --release
+
+      - name: Package Linux bundle
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          tar -czf release/htoochoon-linux-x64.tar.gz \
+            -C engram/build/linux/x64/release/bundle .
+          test -s release/htoochoon-linux-x64.tar.gz
+
+      - name: Upload Linux to Nightly
+        uses: ./.github/actions/deploy
+        with:
+          base_url: ${{ env.RELEASE_BASE_URL }}
+          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
+          target: ${{ env.RELEASE_TARGET }}
+
+  windows:
+    name: Build Windows Desktop
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Builder actions
+        uses: actions/checkout@v4
+
+      - name: Checkout Engram source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ENGRAM_REPO }}
+          ref: ${{ needs.validate.outputs.source_sha }}
+          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
+          path: engram
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - run: flutter config --enable-windows-desktop
+      - working-directory: engram
+        run: flutter pub get
+
+      # flutter_webrtc's archive extraction fails through Flutter's generated
+      # symlinks with modern CMake. Materialize them, convert to junctions,
+      # then run the complete release build.
+      - name: Materialize plugin symlinks
+        shell: pwsh
+        continue-on-error: true
+        working-directory: engram
+        run: flutter build windows --release
+
+      - name: Convert plugin symlinks to junctions
+        shell: pwsh
+        working-directory: engram
+        run: |
+          $dir = "windows/flutter/ephemeral/.plugin_symlinks"
+          if (!(Test-Path $dir)) { Write-Host "::error::.plugin_symlinks was not created"; exit 1 }
+          Get-ChildItem $dir | Where-Object { $_.LinkType } | ForEach-Object {
+            $target = $_.Target
+            if ($target -is [array]) { $target = $target[0] }
+            if (![IO.Path]::IsPathRooted($target)) {
+              $target = [IO.Path]::GetFullPath((Join-Path $_.Parent.FullName $target))
+            }
+            $path = $_.FullName
+            Remove-Item $path -Force
+            cmd /c mklink /J `"$path`" `"$target`" | Out-Null
+          }
+
+      - name: Build Windows
+        working-directory: engram
+        shell: pwsh
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+        run: flutter build windows --release
+
+      - name: Assemble complete Windows bundle
+        shell: pwsh
+        working-directory: engram
+        run: |
+          $stage = "$PWD\dist-win"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          cmake --install build\windows\x64 --config Release --prefix $stage 2>&1 | Out-Host
+          $candidates = @(
+            $stage,
+            "build\windows\x64\runner\Release",
+            "$env:ProgramFiles\htoochoon_engram",
+            "${env:ProgramFiles(x86)}\htoochoon_engram"
+          )
+          $bundle = $null
+          foreach ($candidate in $candidates) {
+            if ((Test-Path "$candidate\flutter_windows.dll") -and (Test-Path "$candidate\data\icudtl.dat")) {
+              $bundle = (Resolve-Path $candidate).Path
+              break
+            }
+          }
+          if (-not $bundle) { Write-Host "::error::No complete Windows bundle found"; exit 1 }
+          Remove-Item "$bundle\*.exp","$bundle\*.lib" -ErrorAction SilentlyContinue
+          "WIN_BUNDLE=$bundle" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Package Windows portable and installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Compress-Archive -Path "$env:WIN_BUNDLE\*" -DestinationPath "release\htoochoon-windows-x64.zip" -Force
+          if ((Get-Item release\htoochoon-windows-x64.zip).Length -lt 8MB) {
+            Write-Host "::error::Windows portable bundle is incomplete"; exit 1
+          }
+          choco install innosetup -y --no-progress
+          $src = "$env:WIN_BUNDLE\*"
+          $iss = @"
+          [Setup]
+          AppName=HtooChoon
+          AppVersion=1.0.0
+          AppPublisher=HtooChoon
+          DefaultDirName={autopf}\HtooChoon
+          DefaultGroupName=HtooChoon
+          DisableProgramGroupPage=yes
+          OutputDir=installer
+          OutputBaseFilename=htoochoon
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          ArchitecturesAllowed=x64
+          ArchitecturesInstallIn64BitMode=x64
+          [Files]
+          Source: "$src"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+          [Icons]
+          Name: "{group}\HtooChoon"; Filename: "{app}\htoochoon_engram.exe"
+          Name: "{autodesktop}\HtooChoon"; Filename: "{app}\htoochoon_engram.exe"
+          [Run]
+          Filename: "{app}\htoochoon_engram.exe"; Description: "Launch HtooChoon"; Flags: nowait postinstall skipifsilent
+          "@
+          Set-Content -Path htoochoon.iss -Value $iss -Encoding ASCII
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" htoochoon.iss
+          Copy-Item installer\htoochoon.exe release\htoochoon.exe
+          if ((Get-Item release\htoochoon.exe).Length -lt 9MB) {
+            Write-Host "::error::Windows installer is incomplete"; exit 1
+          }
+
+      - name: Upload Windows to Nightly
+        uses: ./.github/actions/deploy
+        with:
+          base_url: ${{ env.RELEASE_BASE_URL }}
+          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
+          target: ${{ env.RELEASE_TARGET }}
+
+  apple:
+    name: Build macOS and iOS
+    needs: validate
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Builder actions
+        uses: actions/checkout@v4
+
+      - name: Checkout Engram source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ENGRAM_REPO }}
+          ref: ${{ needs.validate.outputs.source_sha }}
+          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
+          path: engram
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - working-directory: engram
+        run: flutter pub get
+
+      - name: Build macOS
+        working-directory: engram
+        run: flutter build macos --release
+
+      - name: Package macOS DMG
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          APP="$(find engram/build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)"
+          test -n "$APP"
+          hdiutil create -volname "HtooChoon" -srcfolder "$APP" -ov -format UDZO release/htoochoon.dmg
+          test -s release/htoochoon.dmg
+
+      - name: Refresh CocoaPods specs
+        working-directory: engram
+        run: |
+          rm -f ios/Podfile.lock
+          cd ios
+          pod repo update
+
+      - name: Build unsigned iOS
+        working-directory: engram
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          mkdir -p Payload
+          cp -R engram/build/ios/iphoneos/Runner.app Payload/
+          zip -qr release/htoochoon.ipa Payload
+          test -s release/htoochoon.ipa
+
+      - name: Upload Apple builds to Nightly
+        uses: ./.github/actions/deploy
+        with:
+          base_url: ${{ env.RELEASE_BASE_URL }}
+          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
+          target: ${{ env.RELEASE_TARGET }}
+
+  web:
+    name: Build Web bundle
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Builder actions
+        uses: actions/checkout@v4
+
+      - name: Checkout Engram source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ENGRAM_REPO }}
+          ref: ${{ needs.validate.outputs.source_sha }}
+          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
+          path: engram
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - working-directory: engram
+        run: flutter pub get
+
+      - name: Build Web
+        working-directory: engram
+        run: flutter build web --release
+
+      - name: Package Web bundle
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          tar -czf release/htoochoon-web.tar.gz -C engram/build/web .
+          test -s release/htoochoon-web.tar.gz
+
+      - name: Upload Web to Nightly
+        uses: ./.github/actions/deploy
+        with:
+          base_url: ${{ env.RELEASE_BASE_URL }}
+          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
+          target: ${{ env.RELEASE_TARGET }}
+
   manifest:
     name: Publish Nightly manifest
-    needs: android
+    needs: [validate, android, linux, windows, apple, web]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Builder
@@ -130,7 +427,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.ENGRAM_REPO }}
-          ref: ${{ env.ENGRAM_REF }}
+          ref: ${{ needs.validate.outputs.source_sha }}
           ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
           path: engram
 
@@ -151,19 +448,25 @@ jobs:
           import datetime, json, sys
           source_sha, builder_sha, app_version, workflow_run, listing_path = sys.argv[1:]
           labels = {
-            "htoochoon.apk": ("universal", "Android universal APK"),
-            "htoochoon-arm64-v8a.apk": ("arm64-v8a", "Android arm64-v8a"),
-            "htoochoon-armeabi-v7a.apk": ("armeabi-v7a", "Android armeabi-v7a"),
-            "htoochoon-x86_64.apk": ("x86_64", "Android x86_64"),
+            "htoochoon.apk": ("android", "universal", "Android universal APK"),
+            "htoochoon-arm64-v8a.apk": ("android", "arm64-v8a", "Android arm64-v8a"),
+            "htoochoon-armeabi-v7a.apk": ("android", "armeabi-v7a", "Android armeabi-v7a"),
+            "htoochoon-x86_64.apk": ("android", "x86_64", "Android x86_64"),
+            "htoochoon-linux-x64.tar.gz": ("linux", "x64", "Linux x64 bundle"),
+            "htoochoon.exe": ("windows", "x64", "Windows installer"),
+            "htoochoon-windows-x64.zip": ("windows", "x64-portable", "Windows portable bundle"),
+            "htoochoon.dmg": ("macos", "universal", "macOS disk image"),
+            "htoochoon.ipa": ("ios", "universal", "iOS unsigned IPA"),
+            "htoochoon-web.tar.gz": ("web", "universal", "Web deployment bundle"),
           }
           inventory = json.load(open(listing_path, encoding="utf-8"))
           by_name = {item.get("name"): int(item.get("size") or 0) for item in inventory}
           missing = [name for name in labels if by_name.get(name, 0) <= 0]
           if missing:
-            raise SystemExit("missing or empty published APKs: " + ", ".join(missing))
+            raise SystemExit("missing or empty published artifacts: " + ", ".join(missing))
           files = [
-            {"name": name, "size": by_name[name], "platform": "android", "arch": arch, "label": label}
-            for name, (arch, label) in labels.items()
+            {"name": name, "size": by_name[name], "platform": platform, "arch": arch, "label": label}
+            for name, (platform, arch, label) in labels.items()
           ]
           print(json.dumps({
             "version": app_version or source_sha[:7],
