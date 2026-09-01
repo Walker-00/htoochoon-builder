@@ -14,16 +14,15 @@ inputs:
     required: true
   target:
     description: >
-      Release channel/subfolder under /htoochoon-releases on the server, e.g.
-      `latest` (production) or `new-ui-ux` (engram redesign). Defaults to `latest`.
+      Release channel/subfolder under /htoochoon-releases on the server.
+      Builder CI must use `nightly`; beta and production are Founder-promoted.
     required: false
-    default: latest
+    default: nightly
 
 runs:
   using: composite
   steps:
-    # bash on every OS (windows-latest ships Git Bash). split + curl are present
-    # on all three runner OSes.
+    # Chunked HTTPS upload from the Linux Android runner.
     - shell: bash
       env:
         BASE_URL: ${{ inputs.base_url }}

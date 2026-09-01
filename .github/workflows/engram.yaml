@@ -1,51 +1,37 @@
-name: Engram (new-ui-ux) Build
+name: Engram Android Nightly
 
-# Builds the htoochoon-engram redesign and pushes it to its OWN release
-# channel — /htoochoon-releases/new-ui-ux/ on the server, served at
-# https://backend.htoochoon.com/download/new-ui-ux/<file> — completely
-# separate from the production app's /download/latest/<file>. Both can be
-# installed side by side on Android (different applicationId).
-#
-# This workflow lives here, not in htoochoon-engram itself, on purpose:
-# engram is checked out at build time via a read-only deploy key rather than
-# carrying its own CI/secrets.
-#
-# Builds all 6 platforms: Android, Linux, Windows, macOS, iOS, Web.
-#
-# SECRETS (add in this repo's Settings → Secrets → Actions):
-#   ENGRAM_DEPLOY_KEY   — read-only SSH deploy key for git@github.com:Walker-00/htoochoon-engram.git
-#   RELEASE_UPLOAD_KEY  — same value as RELEASE_UPLOAD_KEY on the backend
-#   CF_API_TOKEN / CF_ZONE_ID — optional, for the Cloudflare cache purge step
+# Builder is the single delivery source for the active Engram Flutter app.
+# Successful CI writes to `nightly` only. Founder promotion moves a validated
+# release nightly -> beta -> production; CI cannot overwrite those channels.
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - rust
+    branches: [rust]
+  schedule:
+    # 00:00 Asia/Yangon. This picks up changes from the private source repo.
+    - cron: "30 17 * * *"
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: engram-android-nightly
   cancel-in-progress: true
 
 env:
   FLUTTER_VERSION: "3.47.1"
-  PUB_CACHE: ~/.pub-cache
   RELEASE_BASE_URL: "https://backend.htoochoon.com"
-  RELEASE_TARGET: "new-ui-ux"
+  RELEASE_TARGET: "nightly"
   ENGRAM_REPO: "Walker-00/htoochoon-engram"
   ENGRAM_REF: "rust"
 
 jobs:
-
-# ============================================================
-# Analyze
-# ============================================================
-
-  analyze:
-    name: Analyze Engram
+  validate:
+    name: Validate Engram
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout engram
+      - name: Checkout Engram source
         uses: actions/checkout@v4
         with:
           repository: ${{ env.ENGRAM_REPO }}
@@ -58,35 +44,29 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
-      - name: Cache pub
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
             .dart_tool
           key: pub-engram-${{ hashFiles('pubspec.lock') }}
-          restore-keys: |
-            pub-engram-
+          restore-keys: pub-engram-
 
       - run: flutter pub get
-
-      - name: Flutter analyze
+      - name: Analyze
         run: flutter analyze
-
-
-# ============================================================
-# Android  ->  htoochoon.apk + per-abi apks
-# ============================================================
+      - name: Test
+        run: flutter test
 
   android:
-    name: Android APK
-    needs: analyze
+    name: Build Android APKs
+    needs: validate
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout builder (for the deploy action)
+      - name: Checkout Builder actions
         uses: actions/checkout@v4
 
-      - name: Checkout engram
+      - name: Checkout Engram source
         uses: actions/checkout@v4
         with:
           repository: ${{ env.ENGRAM_REPO }}
@@ -116,423 +96,37 @@ jobs:
         working-directory: engram
         run: flutter build apk --release
 
-      - name: Stage clean-named artifacts
+      - name: Stage APKs
         run: |
+          set -euo pipefail
           mkdir -p release
           apk=engram/build/app/outputs/flutter-apk
           cp "$apk/app-release.apk"             release/htoochoon.apk
           cp "$apk/app-arm64-v8a-release.apk"   release/htoochoon-arm64-v8a.apk
           cp "$apk/app-armeabi-v7a-release.apk" release/htoochoon-armeabi-v7a.apk
           cp "$apk/app-x86_64-release.apk"      release/htoochoon-x86_64.apk
-          ls -la release
-
-      - name: Deploy
-        uses: ./.github/actions/deploy
-        with:
-          base_url: ${{ env.RELEASE_BASE_URL }}
-          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
-          target: ${{ env.RELEASE_TARGET }}
-
-
-# ============================================================
-# Linux  ->  htoochoon-linux-x64.tar.gz
-# ============================================================
-
-  linux:
-    name: Linux Desktop
-    needs: analyze
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout builder (for the deploy action)
-        uses: actions/checkout@v4
-
-      - name: Checkout engram
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.ENGRAM_REPO }}
-          ref: ${{ env.ENGRAM_REF }}
-          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
-          path: engram
-
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - name: Install Linux build deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            clang cmake ninja-build pkg-config \
-            libgtk-3-dev liblzma-dev libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good \
-            libsecret-1-dev libpulse-dev \
-            libasound2-dev libmpv-dev mpv
-
-      - run: flutter config --enable-linux-desktop
-      - working-directory: engram
-        run: flutter pub get
-
-      - name: Build Linux
-        working-directory: engram
-        run: flutter build linux --release
-
-      - name: Package
-        run: |
-          mkdir -p release
-          tar -czf release/htoochoon-linux-x64.tar.gz -C engram/build/linux/x64/release/bundle .
-
-      - name: Deploy
-        uses: ./.github/actions/deploy
-        with:
-          base_url: ${{ env.RELEASE_BASE_URL }}
-          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
-          target: ${{ env.RELEASE_TARGET }}
-
-
-# ============================================================
-# Windows  ->  htoochoon.exe  (Inno Setup installer)
-# `windows-latest` has full VS Community — ATL included, no extra install.
-# ============================================================
-
-  windows:
-    name: Windows Desktop
-    needs: analyze
-    runs-on: windows-latest
-    steps:
-      - name: Checkout builder (for the deploy action)
-        uses: actions/checkout@v4
-
-      - name: Checkout engram
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.ENGRAM_REPO }}
-          ref: ${{ env.ENGRAM_REF }}
-          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
-          path: engram
-
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - run: flutter config --enable-windows-desktop
-      - working-directory: engram
-        run: flutter pub get
-
-      # flutter_webrtc downloads libwebrtc.zip during the build; CMake 3.28+
-      # refuses to extract an archive through a SYMLINK. This first build
-      # materializes Flutter's plugin symlinks then FAILS at the webrtc extract
-      # — that's expected. We then convert the symlinks to junctions (which are
-      # NOT symlinks, so the extract passes) and run a real, complete build.
-      # NOTE: don't use `--config-only` here — after it, the final build skips
-      # the CMake INSTALL step and ships a broken bundle (exe only, no DLLs/data).
-      - name: Materialize plugin symlinks (first build fails at webrtc extract — expected)
-        shell: pwsh
-        continue-on-error: true
-        working-directory: engram
-        run: flutter build windows --release
-
-      - name: Convert plugin symlinks to junctions
-        shell: pwsh
-        working-directory: engram
-        run: |
-          $dir = "windows/flutter/ephemeral/.plugin_symlinks"
-          if (!(Test-Path $dir)) { Write-Host "ERROR: .plugin_symlinks not created by first build"; exit 1 }
-          Get-ChildItem $dir | Where-Object { $_.LinkType } | ForEach-Object {
-            $target = $_.Target
-            if ($target -is [array]) { $target = $target[0] }
-            if (![IO.Path]::IsPathRooted($target)) {
-              $target = [IO.Path]::GetFullPath((Join-Path $_.Parent.FullName $target))
-            }
-            $path = $_.FullName
-            Remove-Item $path -Force
-            cmd /c mklink /J `"$path`" `"$target`" | Out-Null
-            Write-Host "Junction: $($_.Name) -> $target"
-          }
-
-      - name: Build Windows (complete bundle)
-        working-directory: engram
-        shell: pwsh
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-        run: flutter build windows --release
-
-      # flutter build links the exe but the complete runtime (flutter_windows.dll,
-      # data\icudtl.dat, flutter_assets, plugin DLLs) isn't always next to it in
-      # CI. cmake --install assembles a COMPLETE bundle — but on Windows it lands
-      # in C:\Program Files\<app> by default and Flutter's generated CMake can
-      # force-pin that prefix (so --prefix may be ignored). So: install, then
-      # DETECT wherever the complete bundle actually is, and package from there.
-      - name: Assemble & locate complete bundle
-        shell: pwsh
-        working-directory: engram
-        run: |
-          # Try to install into a clean staging dir first.
-          $stage = "$PWD\dist-win"
-          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-          cmake --install build\windows\x64 --config Release --prefix $stage 2>&1 | Out-Host
-
-          # Candidate bundle locations, in priority order.
-          $candidates = @(
-            $stage,
-            "build\windows\x64\runner\Release",
-            "$env:ProgramFiles\htoochoon_engram",
-            "${env:ProgramFiles(x86)}\htoochoon_engram"
-          )
-          $bundle = $null
-          foreach ($c in $candidates) {
-            if ((Test-Path "$c\flutter_windows.dll") -and (Test-Path "$c\data\icudtl.dat")) {
-              $bundle = (Resolve-Path $c).Path; break
-            }
-          }
-          if (-not $bundle) {
-            Write-Host "::error::No complete bundle found. Searched:"
-            $candidates | ForEach-Object { Write-Host "  $_" }
-            Write-Host "=== flutter_windows.dll locations under build\ ==="
-            Get-ChildItem build -Recurse -Filter flutter_windows.dll -ErrorAction SilentlyContinue | Select-Object FullName
+          if find release -type f -name '*.apk' -size 0 -print -quit | grep -q .; then
+            echo "::error::A staged APK is empty"
             exit 1
-          }
-          Write-Host "Complete bundle: $bundle"
-          Get-ChildItem $bundle | Select-Object Name, Length | Format-Table -AutoSize
-          # Drop linker artifacts that may ride along.
-          Remove-Item "$bundle\*.exp","$bundle\*.lib" -ErrorAction SilentlyContinue
-          $size = (Get-ChildItem $bundle -Recurse | Measure-Object Length -Sum).Sum / 1MB
-          Write-Host ("Bundle OK — {0:N1} MB uncompressed" -f $size)
-          "WIN_BUNDLE=$bundle" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Package portable zip
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force release | Out-Null
-          Compress-Archive -Path "$env:WIN_BUNDLE\*" -DestinationPath "release\htoochoon-windows-x64.zip" -Force
-          $mb = (Get-Item release\htoochoon-windows-x64.zip).Length / 1MB
-          Write-Host ("Zip size: {0:N1} MB" -f $mb)
-          if ($mb -lt 8) { Write-Host "::error::Zip only $([math]::Round($mb,1)) MB — incomplete bundle"; exit 1 }
-
-      - name: Build Inno Setup installer
-        shell: pwsh
-        run: |
-          choco install innosetup -y --no-progress
-          $src = "$env:WIN_BUNDLE\*"
-          $iss = @"
-          [Setup]
-          AppName=HtooChoon (new UI/UX)
-          AppVersion=1.0.0
-          AppPublisher=HtooChoon
-          DefaultDirName={autopf}\HtooChoon-NewUI
-          DefaultGroupName=HtooChoon (new UI/UX)
-          DisableProgramGroupPage=yes
-          OutputDir=installer
-          OutputBaseFilename=htoochoon
-          Compression=lzma2
-          SolidCompression=yes
-          WizardStyle=modern
-          ArchitecturesAllowed=x64
-          ArchitecturesInstallIn64BitMode=x64
-          [Files]
-          Source: "$src"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
-          [Icons]
-          Name: "{group}\HtooChoon"; Filename: "{app}\htoochoon_engram.exe"
-          Name: "{autodesktop}\HtooChoon"; Filename: "{app}\htoochoon_engram.exe"
-          [Run]
-          Filename: "{app}\htoochoon_engram.exe"; Description: "Launch HtooChoon"; Flags: nowait postinstall skipifsilent
-          "@
-          Set-Content -Path htoochoon.iss -Value $iss -Encoding ASCII
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" htoochoon.iss
-          New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item installer\htoochoon.exe release\htoochoon.exe
-          # A complete Flutter installer is ~12-20 MB. Anything under 9 MB means
-          # the runtime/assets didn't get packed — fail rather than ship a crasher.
-          $mb = (Get-Item release\htoochoon.exe).Length / 1MB
-          Write-Host ("Installer size: {0:N1} MB" -f $mb)
-          if ($mb -lt 9) { Write-Host "::error::Installer only $([math]::Round($mb,1)) MB — incomplete bundle"; exit 1 }
-          Get-ChildItem release
-
-      - name: Deploy
-        uses: ./.github/actions/deploy
-        with:
-          base_url: ${{ env.RELEASE_BASE_URL }}
-          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
-          target: ${{ env.RELEASE_TARGET }}
-
-
-# ============================================================
-# macOS  ->  htoochoon.dmg
-# ============================================================
-
-  macos:
-    name: macOS Desktop
-    needs: analyze
-    runs-on: macos-latest
-    steps:
-      - name: Checkout builder (for the deploy action)
-        uses: actions/checkout@v4
-
-      - name: Checkout engram
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.ENGRAM_REPO }}
-          ref: ${{ env.ENGRAM_REF }}
-          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
-          path: engram
-
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - working-directory: engram
-        run: flutter pub get
-
-      - name: Build macOS
-        working-directory: engram
-        run: flutter build macos --release
-
-      - name: Make DMG
-        run: |
-          mkdir -p release
-          APP="$(find engram/build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)"
-          if [ -z "$APP" ]; then echo "No .app found:"; ls -la engram/build/macos/Build/Products/Release || true; exit 1; fi
-          echo "Packaging: $APP"
-          hdiutil create -volname "HtooChoon" -srcfolder "$APP" -ov -format UDZO release/htoochoon.dmg
-
-      - name: Deploy
-        uses: ./.github/actions/deploy
-        with:
-          base_url: ${{ env.RELEASE_BASE_URL }}
-          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
-          target: ${{ env.RELEASE_TARGET }}
-
-
-# ============================================================
-# iOS  ->  htoochoon.ipa  (unsigned, sideload/AltStore)
-# This is a release gate: the manifest is not promoted unless every advertised
-# platform artifact is built and uploaded successfully.
-# ============================================================
-
-  ios:
-    name: iOS
-    needs: analyze
-    runs-on: macos-latest
-    steps:
-      - name: Checkout builder (for the deploy action)
-        uses: actions/checkout@v4
-
-      - name: Checkout engram
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.ENGRAM_REPO }}
-          ref: ${{ env.ENGRAM_REF }}
-          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
-          path: engram
-
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - working-directory: engram
-        run: flutter pub get
-
-      - name: Refresh CocoaPods specs
-        working-directory: engram
-        run: |
-          rm -f ios/Podfile.lock
-          cd ios && pod repo update
-
-      - name: Build iOS unsigned
-        working-directory: engram
-        run: flutter build ios --release --no-codesign
-
-      - name: Package IPA
-        run: |
-          mkdir -p Payload release
-          cp -R engram/build/ios/iphoneos/Runner.app Payload/
-          zip -qr release/htoochoon.ipa Payload
-
-      - name: Deploy
-        uses: ./.github/actions/deploy
-        with:
-          base_url: ${{ env.RELEASE_BASE_URL }}
-          key: ${{ secrets.RELEASE_UPLOAD_KEY }}
-          target: ${{ env.RELEASE_TARGET }}
-
-
-# ============================================================
-# Web  ->  htoochoon-web.tar.gz
-# Web is explicitly deferred product-wise (per project memory) — build stays
-# non-blocking, same as the production workflow.
-# ============================================================
-
-  web:
-    name: Web
-    needs: analyze
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout builder (for the deploy action)
-        uses: actions/checkout@v4
-
-      - name: Checkout engram
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.ENGRAM_REPO }}
-          ref: ${{ env.ENGRAM_REF }}
-          ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
-          path: engram
-
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - working-directory: engram
-        run: flutter pub get
-
-      - name: Build Web
-        working-directory: engram
-        run: flutter build web --release
-
-      - name: Package
-        run: |
-          mkdir -p release
-          if [ -d engram/build/web ]; then
-            tar -czf release/htoochoon-web.tar.gz -C engram/build/web .
-          else
-            echo "Web build missing; skipping."; exit 0
           fi
+          ls -lh release
 
-      - name: Deploy
-        if: ${{ hashFiles('release/htoochoon-web.tar.gz') != '' }}
+      - name: Upload APKs to Nightly
         uses: ./.github/actions/deploy
         with:
           base_url: ${{ env.RELEASE_BASE_URL }}
           key: ${{ secrets.RELEASE_UPLOAD_KEY }}
           target: ${{ env.RELEASE_TARGET }}
-
-
-# ============================================================
-# Manifest  ->  latest.json  (for the new-ui-ux channel)
-# ============================================================
 
   manifest:
-    name: Publish manifest
-    needs: [android, linux, windows, macos, ios, web]
+    name: Publish Nightly manifest
+    needs: android
     runs-on: ubuntu-latest
-    env:
-      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-      CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Builder
+        uses: actions/checkout@v4
 
-      # Capture the application source commit as the release version. The
-      # builder repository commit is provenance too, but is not the app build.
-      - name: Checkout engram for release provenance
+      - name: Checkout Engram for provenance
         uses: actions/checkout@v4
         with:
           repository: ${{ env.ENGRAM_REPO }}
@@ -540,82 +134,54 @@ jobs:
           ssh-key: ${{ secrets.ENGRAM_DEPLOY_KEY }}
           path: engram
 
-      - name: Build latest.json
+      - name: Build manifest from published inventory
         env:
           RELEASE_KEY: ${{ secrets.RELEASE_UPLOAD_KEY }}
           BASE: ${{ env.RELEASE_BASE_URL }}
         run: |
-          curl -sS --retry 6 --retry-delay 5 --retry-all-errors \
+          set -euo pipefail
+          curl -fsS --retry 6 --retry-delay 5 --retry-all-errors \
             -H "x-release-key: $RELEASE_KEY" \
-            "${BASE%/}/god/release/list?target=${{ env.RELEASE_TARGET }}" > listing.json || echo '[]' > listing.json
-          cat listing.json
-          mkdir -p release
+            "${BASE%/}/god/release/list?target=${RELEASE_TARGET}" > listing.json
           SOURCE_SHA="$(git -C engram rev-parse HEAD)"
-          python3 - "$SOURCE_SHA" "${{ github.sha }}" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" listing.json <<'PY' > release/latest.json
-          import sys, json, datetime
-          sha = sys.argv[1] if len(sys.argv) > 1 else ""
-          builder_sha = sys.argv[2] if len(sys.argv) > 2 else ""
-          workflow_run = sys.argv[3] if len(sys.argv) > 3 else ""
-          listing = sys.argv[4] if len(sys.argv) > 4 else "listing.json"
+          APP_VERSION="$(sed -n 's/^version:[[:space:]]*//p' engram/pubspec.yaml | head -n1)"
+          python3 - "$SOURCE_SHA" "${{ github.sha }}" "$APP_VERSION" \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            listing.json <<'PY' > latest.json
+          import datetime, json, sys
+          source_sha, builder_sha, app_version, workflow_run, listing_path = sys.argv[1:]
           labels = {
-            "htoochoon.apk": ("android", "universal", "Android (universal APK)"),
-            "htoochoon-arm64-v8a.apk": ("android", "arm64-v8a", "Android arm64-v8a"),
-            "htoochoon-armeabi-v7a.apk": ("android", "armeabi-v7a", "Android armeabi-v7a"),
-            "htoochoon-x86_64.apk": ("android", "x86_64", "Android x86_64"),
-            "htoochoon-linux-x64.tar.gz": ("linux", "x64", "Linux x64 (tar.gz)"),
-            "htoochoon.exe": ("windows", "x64", "Windows installer (.exe)"),
-            "htoochoon.dmg": ("macos", "universal", "macOS (.dmg)"),
-            "htoochoon.ipa": ("ios", "universal", "iOS (unsigned .ipa)"),
-            "htoochoon-web.tar.gz": ("web", "x64", "Web build (tar.gz)"),
+            "htoochoon.apk": ("universal", "Android universal APK"),
+            "htoochoon-arm64-v8a.apk": ("arm64-v8a", "Android arm64-v8a"),
+            "htoochoon-armeabi-v7a.apk": ("armeabi-v7a", "Android armeabi-v7a"),
+            "htoochoon-x86_64.apk": ("x86_64", "Android x86_64"),
           }
-          try:
-            entries = json.load(open(listing, encoding="utf-8"))
-          except Exception:
-            entries = []
-          files = []
-          for e in entries:
-            name = e.get("name", "")
-            if not name:
-              continue
-            plat, arch, label = labels.get(name, ("other", "", name))
-            files.append({"name": name, "size": int(e.get("size") or 0),
-                          "platform": plat, "arch": arch, "label": label})
-          order = ["android", "linux", "windows", "macos", "ios", "web", "other"]
-          files.sort(key=lambda f: (order.index(f["platform"]) if f["platform"] in order else 99, f["name"]))
+          inventory = json.load(open(listing_path, encoding="utf-8"))
+          by_name = {item.get("name"): int(item.get("size") or 0) for item in inventory}
+          missing = [name for name in labels if by_name.get(name, 0) <= 0]
+          if missing:
+            raise SystemExit("missing or empty published APKs: " + ", ".join(missing))
+          files = [
+            {"name": name, "size": by_name[name], "platform": "android", "arch": arch, "label": label}
+            for name, (arch, label) in labels.items()
+          ]
           print(json.dumps({
-            "version": sha[:7],
-            "commit": sha,
+            "version": app_version or source_sha[:7],
+            "commit": source_sha,
             "builderCommit": builder_sha,
             "workflowRun": workflow_run,
-            "channel": "new-ui-ux",
+            "channel": "nightly",
             "released": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "files": files,
           }, indent=2))
           PY
+          mkdir -p release
+          mv latest.json release/latest.json
           cat release/latest.json
 
-      - name: Deploy manifest
+      - name: Upload Nightly manifest
         uses: ./.github/actions/deploy
         with:
           base_url: ${{ env.RELEASE_BASE_URL }}
           key: ${{ secrets.RELEASE_UPLOAD_KEY }}
           target: ${{ env.RELEASE_TARGET }}
-
-      - name: Purge Cloudflare cache
-        if: ${{ always() && env.CF_API_TOKEN != '' && env.CF_ZONE_ID != '' }}
-        run: |
-          base="https://backend.htoochoon.com/download/${{ env.RELEASE_TARGET }}"
-          files='latest.json htoochoon.apk htoochoon-arm64-v8a.apk htoochoon-armeabi-v7a.apk htoochoon-x86_64.apk htoochoon-linux-x64.tar.gz htoochoon.exe htoochoon.dmg htoochoon.ipa htoochoon-web.tar.gz'
-          json='{"files":['
-          first=1
-          for f in $files; do
-            [ $first -eq 1 ] || json="$json,"
-            first=0
-            json="$json\"$base/$f\""
-          done
-          json="$json]}"
-          curl -fsS -X POST \
-            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
-            -H "Authorization: Bearer ${CF_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data "$json" && echo "Cloudflare cache purged"

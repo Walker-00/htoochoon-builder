@@ -1,32 +1,42 @@
 # htoochoon-builder
 
-Builds HtooChoon apps that don't carry their own CI. Each app is checked out
-here via a read-only deploy key instead of hosting the workflow itself.
+The single CI delivery source for the active HtooChoon Engram Flutter app.
+The private application source stays in `Walker-00/htoochoon-engram`; this
+public repository owns its Android build workflow and no longer builds the
+retired Flutter client.
 
-## engram (new-ui-ux)
+## Release flow
 
-`.github/workflows/engram.yaml` builds `git@github.com:Walker-00/htoochoon-engram.git`
-(branch `rust`) — Android, Linux, Windows, macOS, iOS, Web — and uploads to the
-backend's `new-ui-ux` release channel, served at
-`https://backend.htoochoon.com/download/new-ui-ux/<file>`. Separate from the
-legacy production app's `latest` channel — both install side by side with
-different Android `applicationId` values.
-The shared deploy action sends each artifact's expected byte size to the
-backend commit endpoint, so a truncated or empty upload is rejected before it
-can become a published release.
+```text
+Engram rust branch
+       ↓
+Builder validation + Android APK build
+       ↓
+nightly
+       ↓ Founder approval
+beta
+       ↓ Founder approval
+production (`latest` download compatibility path)
+```
 
-The manifest is published only after every advertised platform job succeeds.
-It records the Engram source SHA, Builder SHA and workflow-run URL so the Founder
-Control Center can show exact release provenance.
+`.github/workflows/engram.yaml` runs manually, whenever Builder's `rust`
+branch changes, and nightly at 00:00 Asia/Yangon. A successful run uploads only
+the universal and per-ABI Android APKs to
+`https://backend.htoochoon.com/download/nightly/`.
 
-### Secrets required (Settings → Secrets and variables → Actions)
+CI has no route that writes to beta or production. Promotions are authenticated
+Founder operations performed by the HtooChoon Control Center. The backend
+validates the complete source manifest and non-empty artifacts, snapshots the
+previous destination release for recovery, then switches the destination
+channel atomically.
 
-| Secret | What |
-|---|---|
-| `ENGRAM_DEPLOY_KEY` | Read-only SSH deploy key for `htoochoon-engram` (add the matching public key as a Deploy Key on that repo) |
-| `RELEASE_UPLOAD_KEY` | Same value as `RELEASE_UPLOAD_KEY` on the backend |
-| `CF_API_TOKEN` / `CF_ZONE_ID` | Optional — Cloudflare cache purge after each release |
+## GitHub Actions secrets
 
-Trigger: `workflow_dispatch` (manual) or a push to this repo's `rust` branch.
-Pushing to `htoochoon-engram` itself does NOT trigger a build — there's no
-webhook between the two repos yet.
+| Secret | Required | Purpose |
+|---|---:|---|
+| `ENGRAM_DEPLOY_KEY` | Yes | Read-only deploy key for `Walker-00/htoochoon-engram` |
+| `RELEASE_UPLOAD_KEY` | Yes | Must equal the backend `RELEASE_UPLOAD_KEY` |
+
+The old optional Cloudflare purge secrets are no longer needed in Builder.
+Cache purging belongs to the backend promotion operation, where the channel
+actually changes.
