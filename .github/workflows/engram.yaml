@@ -161,7 +161,22 @@ jobs:
 
       - name: Build Linux
         working-directory: engram
-        run: flutter build linux --release
+        env:
+          # Windows and Linux sign in to Google through an installed-app OAuth
+          # client, and Google's token endpoint refuses that exchange without a
+          # client secret — `invalid_request: client_secret is missing`. The
+          # build compiles either way, so a desktop artifact shipped without
+          # this looks green in CI and has Google sign-in dead in the hand.
+          #
+          # An unset secret is an empty --dart-define, which is exactly the
+          # behaviour these builds already had; the app now reports it as
+          # `desktop-not-configured` instead of failing three calls later.
+          # Add GOOGLE_DESKTOP_CLIENT_SECRET to this repo's secrets to turn it
+          # on — nothing else has to change.
+          DESKTOP_SECRET: ${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
+        run: >
+          flutter build linux --release
+          --dart-define=GOOGLE_DESKTOP_CLIENT_SECRET=$DESKTOP_SECRET
 
       - name: Package Linux bundle
         run: |
@@ -235,7 +250,12 @@ jobs:
         shell: pwsh
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-        run: flutter build windows --release
+          # See the Linux build for why this is here. Unset is the same as
+          # today; setting the repo secret turns desktop Google sign-in on.
+          DESKTOP_SECRET: ${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
+        run: >
+          flutter build windows --release
+          --dart-define=GOOGLE_DESKTOP_CLIENT_SECRET=$env:DESKTOP_SECRET
 
       - name: Assemble complete Windows bundle
         shell: pwsh

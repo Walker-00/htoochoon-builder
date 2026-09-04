@@ -60,6 +60,24 @@ runs:
                 --data-binary @"$part" \
                 "$BASE/god/release/part?name=$name&index=$i&target=$TARGET" || echo 000)"
               if [ "$code" = "200" ] || [ "$code" = "201" ]; then break; fi
+              # 401/403/404 are not transient. The uploader's key guard answers
+              # 404 on purpose — a wrong or missing key makes the route look as
+              # though it does not exist — so retrying a 404 five times over
+              # fifty seconds only delays a failure that was decided on the
+              # first request, and buries the reason under four identical
+              # lines. Say what it actually means and stop.
+              case "$code" in
+                401|403|404)
+                  echo "::error::$name part $i rejected with HTTP $code — this is not transient."
+                  echo "::error::The release uploader answers 404 when x-release-key does not match."
+                  echo "::error::Check that RELEASE_UPLOAD_KEY in this repo's secrets is byte-identical"
+                  echo "::error::to RELEASE_UPLOAD_KEY in the backend's .env (a trailing newline or a"
+                  echo "::error::quote left in the .env value is a length mismatch, and therefore a 404),"
+                  echo "::error::and that the backend was restarted after the value was set."
+                  echo "::error::The backend logs which of the three failures it was."
+                  rm -rf "$tmp"; exit 1
+                  ;;
+              esac
               if [ "$attempt" -ge 5 ]; then
                 echo "::error::Upload of $name part $i failed after $attempt tries (HTTP $code)"
                 rm -rf "$tmp"; exit 1
